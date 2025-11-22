@@ -5,6 +5,9 @@
 local SEAL_NAME              = "Seal of Righteousness"
 local AURA_NAME              = "Devotion Aura"
 local BLESSING_NAME          = "Blessing of Might"
+-- When `SUPPORT_MODE` is true, use Blessing of Wisdom instead for mana generation
+local SUPPORT_BLESSING_NAME  = "Blessing of Wisdom"
+local SUPPORT_MODE = false
 local JUDGEMENT_NAME         = "Judgement"
 local JUDGEMENT_DEBUFF_NAME  = "Judgement of Righteousness"
 local HAMMER_NAME            = "Hammer of Justice"
@@ -65,8 +68,9 @@ local function HasDevotionAura()
     return HasBuffByName("player", AURA_NAME)
 end
 
-local function HasBlessingOfMight()
-    return HasBuffByName("player", BLESSING_NAME)
+local function HasBlessing()
+    local want = SUPPORT_MODE and SUPPORT_BLESSING_NAME or BLESSING_NAME
+    return HasBuffByName("player", want)
 end
 
 local function HasSealOfRighteousness()
@@ -182,8 +186,9 @@ function SmartSealAttack()
         return
     end
 
-    if not HasBlessingOfMight() then
-        CastSpellByName(BLESSING_NAME)
+    if not HasBlessing() then
+        local toCast = SUPPORT_MODE and SUPPORT_BLESSING_NAME or BLESSING_NAME
+        CastSpellByName(toCast)
         return
     end
 
@@ -210,11 +215,28 @@ end
 -- Slash command: /ssa
 -------------------------------------------------------
 SLASH_SMARTSEALATTACK1 = "/ssa"
-SlashCmdList["SMARTSEALATTACK"] = function()
+SlashCmdList["SMARTSEALATTACK"] = function(msg)
+    local m = msg or ""
+    m = tostring(m)
+    m = string.lower(m)
+    m = string.gsub(m, "^%s+", "")
+    m = string.gsub(m, "%s+$", "")
+    if m == "support on" then
+        SUPPORT_MODE = true
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode ON — using Blessing of Wisdom")
+        return
+    elseif m == "support off" then
+        SUPPORT_MODE = false
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode OFF — using Blessing of Might")
+        return
+    elseif m == "support" then
+        SUPPORT_MODE = not SUPPORT_MODE
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode " .. (SUPPORT_MODE and "ON" or "OFF"))
+        return
+    end
     SmartSealAttack()
 end
 
 -------------------------------------------------------
 -- Basic load message
 -------------------------------------------------------
-
