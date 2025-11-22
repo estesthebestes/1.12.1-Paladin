@@ -3,6 +3,7 @@
 -- maintain Judgement of Righteousness, handle emergencies, and auto-attack without toggling.
 
 local SEAL_NAME              = "Seal of Righteousness"
+local SEAL_OF_COMMAND_NAME   = "Seal of Command"
 local AURA_NAME              = "Devotion Aura"
 local BLESSING_NAME          = "Blessing of Might"
 -- When `SUPPORT_MODE` is true, use Blessing of Wisdom instead for mana generation
@@ -75,6 +76,35 @@ end
 
 local function HasSealOfRighteousness()
     return HasBuffByName("player", SEAL_NAME)
+end
+
+local function HasSealOfCommand()
+    return HasBuffByName("player", SEAL_OF_COMMAND_NAME)
+end
+
+local function IsCommandLearned()
+    for tab = 1, GetNumSpellTabs() do
+        local _, _, offset, numSpells = GetSpellTabInfo(tab)
+        for i = 1, numSpells do
+            local spellIndex = offset + i
+            local name = GetSpellName(spellIndex, "spell")
+            if name == SEAL_OF_COMMAND_NAME then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function GetBestSeal()
+    if IsCommandLearned() then
+        return SEAL_OF_COMMAND_NAME
+    end
+    return SEAL_NAME
+end
+
+local function HasActiveSeal()
+    return HasSealOfCommand() or HasSealOfRighteousness()
 end
 
 local function HasJudgementDebuff(unit)
@@ -198,13 +228,14 @@ function SmartSealAttack()
         return
     end
 
-    if IsJudgementReady() and not HasJudgementDebuff("target") and HasSealOfRighteousness() then
+    if IsJudgementReady() and not HasJudgementDebuff("target") and HasActiveSeal() then
         CastSpellByName(JUDGEMENT_NAME)
         return
     end
 
-    if not HasSealOfRighteousness() then
-        CastSpellByName(SEAL_NAME)
+    if not HasActiveSeal() then
+        local bestSeal = GetBestSeal()
+        CastSpellByName(bestSeal)
         return
     end
 
