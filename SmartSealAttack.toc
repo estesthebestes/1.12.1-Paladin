@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title: Smart Seal Attack
-## Notes: Targets nearest enemy, keeps Seal of Righteousness up, and starts auto-attack.
-## Author: Hunter + ChatGPT
-## Version: 1.0
+## Notes: Ret/Support combat helper with optional Holy healer mode.
+## Author: Estesthebestes
+## Version: 1.1
 SmartSealAttack.lua
