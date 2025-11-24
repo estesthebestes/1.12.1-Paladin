@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-global
 -- SmartSealAttack.lua
 -- Helper for Paladins: combat automation for Ret/Support plus Holy healer mode.
 
@@ -27,12 +28,13 @@ local MODES = {
     RET = "ret",
     SUPPORT = "support",
     HEALER = "healer",
-}
+} 
 
 local currentMode = MODES.RET
 local HEALER_DPS_MODE = false
 local healerJudgeSeal = nil
 local supportHealTarget = nil
+local HEAL_PULSE_ACTIVE = false
 
 -- What blessing this paladin is assigned to keep up in healer mode.
 -- Options: "wisdom", "might", "salvation", "kings"
@@ -415,15 +417,17 @@ local function HandleRetAndSupport()
         return
     end
 
-    local blessName = GetDesiredBlessingName()
-    if IsSpellKnown(blessName) and not HasBuffByName("player", blessName) then
-        SetNextAction("Blessing: " .. blessName)
-        CastSpellOnUnit(blessName, "player")
-        return
+    if not HEAL_PULSE_ACTIVE then
+        local blessName = GetDesiredBlessingName()
+        if IsSpellKnown(blessName) and not HasBuffByName("player", blessName) then
+            SetNextAction("Blessing: " .. blessName)
+            CastSpellOnUnit(blessName, "player")
+            return
+        end
     end
 
     -- Keep Blessing of Might on physical DPS (warriors/rogues/hunters)
-    if IsSpellKnown(BLESSING_MIGHT_NAME) then
+    if not HEAL_PULSE_ACTIVE and IsSpellKnown(BLESSING_MIGHT_NAME) then
         local mightTarget = FindMightTargetNeedingBuff()
         if mightTarget then
             SetNextAction("BoM -> " .. (UnitName(mightTarget) or mightTarget))
@@ -648,6 +652,19 @@ end
 -------------------------------------------------------
 -- Entry point
 -------------------------------------------------------
+local function SmartSealHealPulse()
+    -- Temporarily run healer logic without flipping currentMode persistently.
+    local prevMode = currentMode
+    local prevHealerDps = HEALER_DPS_MODE
+    currentMode = MODES.HEALER
+    HEALER_DPS_MODE = false -- keep this as a pure heal pulse
+    HEAL_PULSE_ACTIVE = true
+    HandleHealerMode()
+    HEAL_PULSE_ACTIVE = false
+    HEALER_DPS_MODE = prevHealerDps
+    currentMode = prevMode
+end
+
 function SmartSealAttack()
     if currentMode == MODES.HEALER then
         HandleHealerMode()
@@ -693,6 +710,9 @@ SlashCmdList["SMARTSEALATTACK"] = function(msg)
     elseif m == "healer dps off" then
         HEALER_DPS_MODE = false
         DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Healer DPS mode OFF")
+        return
+    elseif m == "heal" or m == "heal pulse" or m == "heal now" then
+        SmartSealHealPulse()
         return
     end
 
