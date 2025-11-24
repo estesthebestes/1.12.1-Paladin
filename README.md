@@ -6,8 +6,9 @@ This is a for fun project to see how far I can take scripting a lua based combat
 
 - `/ssa` — run the routine in your current mode
 - `/ssa ret` — default Ret behavior
-- `/ssa support` — swap to the support variant (Blessing of Wisdom focus)
+- `/ssa support` — swap to the support variant (Blessing of Wisdom focus) and heal allies below 50% HP until they are at an acceptable HP
 - `/ssa healer` — enable Holy healer mode
+- `/ssa healer dps on` - enable some dps while healing instead of just spamming heals 
 - `/ssa assign <wisdom|might|salvation|kings>` — set which blessing you are assigned to keep up while healing
 
 ### Healer mode flow
