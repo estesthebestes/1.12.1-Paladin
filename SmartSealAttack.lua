@@ -18,6 +18,44 @@ local DIVINE_PROTECTION_NAME = "Divine Protection"
 -- Put your "Attack" ability on this action slot (1 = bottom-left first button)
 local ATTACK_ACTION_SLOT = 1
 
+-- Small UI frame to show what the rotation intends to do next
+local SSA_UIFrame = nil
+local SSA_UIText  = nil
+
+local function SSA_CreateUI()
+    if SSA_UIFrame then return end
+
+    local f = CreateFrame("Frame", "SSA_NextActionFrame", UIParent)
+    f:SetWidth(200)
+    f:SetHeight(40)
+    f:SetPoint("CENTER", UIParent, "CENTER", 200, 120)
+    f:SetBackdrop({
+        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 }
+    })
+    f:SetBackdropColor(0, 0, 0, 0.5)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+
+    local text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    text:SetPoint("CENTER", f, "CENTER", 0, 0)
+    text:SetJustifyH("LEFT")
+    text:SetText("SSA: ready")
+
+    SSA_UIFrame = f
+    SSA_UIText  = text
+end
+
+local function SSA_UpdateUI(nextAction)
+    if not SSA_UIFrame or not SSA_UIText then return end
+    SSA_UIText:SetText("Next: " .. (nextAction or "none"))
+end
+
 -------------------------------------------------------
 -- Generic tooltip-based buff check
 -------------------------------------------------------
@@ -194,52 +232,83 @@ local function StartAutoAttack()
 end
 
 -------------------------------------------------------
--- Core function: SmartSealAttack
+-- Next-action predictor
 -------------------------------------------------------
-function SmartSealAttack()
+local function DetermineNextAction()
     if UnitAffectingCombat("player") then
         local health = UnitHealth("player")
         local maxHealth = UnitHealthMax("player")
         if maxHealth > 0 and (health / maxHealth) < 0.20 then
-            CastSpellByName(DIVINE_PROTECTION_NAME)
-            return
+            return "DIVINE_PROTECTION"
         end
     end
 
     if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
-        TargetNearestEnemy()
+        return "TARGET_NEAREST"
     end
-    if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then return end
 
     if not HasDevotionAura() then
-        CastSpellByName(AURA_NAME)
-        return
+        return "AURA"
     end
 
     if not HasBlessing() then
-        local toCast = SUPPORT_MODE and SUPPORT_BLESSING_NAME or BLESSING_NAME
-        CastSpellByName(toCast)
-        return
+        return "BLESSING"
     end
 
     local recentHits = GetRecentHitCount()
     if recentHits >= HITS_FOR_HOJ and not HasHammerStun("target") then
-        CastSpellByName(HAMMER_NAME)
-        return
+        return "HAMMER"
     end
 
     if IsJudgementReady() and not HasJudgementDebuff("target") and HasActiveSeal() then
-        CastSpellByName(JUDGEMENT_NAME)
-        return
+        return "JUDGEMENT"
     end
 
     if not HasActiveSeal() then
+        return "SEAL"
+    end
+
+    return "ATTACK"
+end
+
+-------------------------------------------------------
+-- Core function: SmartSealAttack
+-------------------------------------------------------
+function SmartSealAttack()
+    if not SSA_UIFrame then
+        SSA_CreateUI()
+    end
+
+    local nextAction = DetermineNextAction()
+    SSA_UpdateUI(nextAction)
+
+    if nextAction == "DIVINE_PROTECTION" then
+        CastSpellByName(DIVINE_PROTECTION_NAME)
+        return
+    elseif nextAction == "TARGET_NEAREST" then
+        TargetNearestEnemy()
+        return
+    elseif nextAction == "AURA" then
+        CastSpellByName(AURA_NAME)
+        return
+    elseif nextAction == "BLESSING" then
+        local toCast = SUPPORT_MODE and SUPPORT_BLESSING_NAME or BLESSING_NAME
+        CastSpellByName(toCast)
+        return
+    elseif nextAction == "HAMMER" then
+        CastSpellByName(HAMMER_NAME)
+        return
+    elseif nextAction == "JUDGEMENT" then
+        CastSpellByName(JUDGEMENT_NAME)
+        return
+    elseif nextAction == "SEAL" then
         local bestSeal = GetBestSeal()
         CastSpellByName(bestSeal)
         return
+    elseif nextAction == "ATTACK" then
+        StartAutoAttack()
+        return
     end
-
-    StartAutoAttack()
 end
 
 -------------------------------------------------------
@@ -254,11 +323,11 @@ SlashCmdList["SMARTSEALATTACK"] = function(msg)
     m = string.gsub(m, "%s+$", "")
     if m == "support on" then
         SUPPORT_MODE = true
-        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode ON — using Blessing of Wisdom")
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode ON (Blessing of Wisdom)")
         return
     elseif m == "support off" then
         SUPPORT_MODE = false
-        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode OFF — using Blessing of Might")
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode OFF (Blessing of Might)")
         return
     elseif m == "support" then
         SUPPORT_MODE = not SUPPORT_MODE
@@ -271,3 +340,12 @@ end
 -------------------------------------------------------
 -- Basic load message
 -------------------------------------------------------
+local f = CreateFrame("Frame")
+f:RegisterEvent("PLAYER_LOGIN")
+f:SetScript("OnEvent", function()
+    SSA_CreateUI()
+    SSA_UpdateUI("ready")
+    if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00SmartSealAttack loaded.|r Type |cffffff00/ssa|r or use /run SmartSealAttack().")
+    end
+end)
