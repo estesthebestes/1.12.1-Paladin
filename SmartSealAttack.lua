@@ -13,6 +13,9 @@ local BLESSING_SALVATION_NAME     = "Blessing of Salvation"
 local BLESSING_KINGS_NAME         = "Blessing of Kings"
 local JUDGEMENT_NAME              = "Judgement"
 local JUDGEMENT_DEBUFF_NAME       = "Judgement of Righteousness"
+local JUDGEMENT_OF_COMMAND_DEBUFF_NAME = "Judgement of Command"
+local JUDGEMENT_OF_LIGHT_DEBUFF_NAME  = "Judgement of Light"
+local JUDGEMENT_OF_WISDOM_DEBUFF_NAME = "Judgement of Wisdom"
 local HAMMER_NAME                 = "Hammer of Justice"
 local HAMMER_DEBUFF_NAME          = "Hammer of Justice"
 local DIVINE_PROTECTION_NAME      = "Divine Protection"
@@ -27,6 +30,10 @@ local MODES = {
 }
 
 local currentMode = MODES.RET
+local SUPPORT_MODE = false
+local HEALER_DPS_MODE = false
+local healerJudgeSeal = nil
+local supportHealTarget = nil
 
 -- What blessing this paladin is assigned to keep up in healer mode.
 -- Options: "wisdom", "might", "salvation", "kings"
@@ -41,6 +48,43 @@ local BLESSING_BY_KEY = {
     salvation = BLESSING_SALVATION_NAME,
     kings = BLESSING_KINGS_NAME,
 }
+
+-- Next action display
+local nextActionText = "Ready"
+local function SetNextAction(text)
+    nextActionText = text
+    if SSA_NextActionFrame and SSA_NextActionFrame.text then
+        SSA_NextActionFrame.text:SetText("SSA: " .. text)
+    end
+end
+
+local function EnsureNextActionFrame()
+    if SSA_NextActionFrame then return end
+    local f = CreateFrame("Frame", "SSA_NextActionFrame", UIParent)
+    f:SetWidth(190)
+    f:SetHeight(24)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 180)
+    f:SetFrameStrata("HIGH")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:SetBackdrop({
+        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 12,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    f:SetBackdropColor(0, 0, 0, 0.4)
+
+    local text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    text:SetAllPoints(f)
+    text:SetJustifyH("CENTER")
+    text:SetJustifyV("MIDDLE")
+    text:SetText("SSA: Ready")
+    f.text = text
+end
 
 -------------------------------------------------------
 -- Generic tooltip-based buff/debuff checks
@@ -129,6 +173,12 @@ local function GetPlayerManaFrac()
     return mana / maxMana
 end
 
+local function GetUnitHealthFrac(unit)
+    local maxHealth = UnitHealthMax(unit)
+    if not maxHealth or maxHealth <= 0 then return nil end
+    return UnitHealth(unit) / maxHealth
+end
+
 local function GetDesiredAuraName()
     if currentMode == MODES.HEALER and IsSpellKnown(CONCENTRATION_AURA_NAME) then
         return CONCENTRATION_AURA_NAME
@@ -184,6 +234,14 @@ local function HasJudgementDebuff(unit)
     return HasDebuffByName(unit, JUDGEMENT_DEBUFF_NAME)
 end
 
+local function HasRetJudgementDebuff(unit)
+    return HasDebuffByName(unit, JUDGEMENT_OF_COMMAND_DEBUFF_NAME) or HasDebuffByName(unit, JUDGEMENT_DEBUFF_NAME)
+end
+
+local function HasHealerJudgementDebuff(unit)
+    return HasDebuffByName(unit, JUDGEMENT_OF_LIGHT_DEBUFF_NAME) or HasDebuffByName(unit, JUDGEMENT_OF_WISDOM_DEBUFF_NAME)
+end
+
 local function HasHammerStun(unit)
     return HasDebuffByName(unit, HAMMER_DEBUFF_NAME)
 end
@@ -237,13 +295,24 @@ local function StartAutoAttack()
 end
 
 local function CastSpellOnUnit(spellName, unit)
+    if not UnitExists(unit) then return end
+
+    local hadTarget = UnitExists("target")
+
+    -- Force correct unit into cursor/target, then restore.
+    TargetUnit(unit)
     CastSpellByName(spellName)
     if SpellIsTargeting() then
-        if UnitExists(unit) then
-            SpellTargetUnit(unit)
-        else
+        SpellTargetUnit(unit)
+        if SpellIsTargeting() then
             SpellStopTargeting()
         end
+    end
+
+    if hadTarget then
+        TargetLastTarget()
+    else
+        ClearTarget()
     end
 end
 
@@ -256,14 +325,23 @@ local function ForEachGroupUnit(callback)
     end
 
     callback("player")
+    if UnitExists("pet") then
+        callback("pet")
+    end
 
     if GetNumRaidMembers() and GetNumRaidMembers() > 0 then
         for i = 1, GetNumRaidMembers() do
             callback("raid" .. i)
+            if UnitExists("raidpet" .. i) then
+                callback("raidpet" .. i)
+            end
         end
     else
         for i = 1, GetNumPartyMembers() do
             callback("party" .. i)
+            if UnitExists("partypet" .. i) then
+                callback("partypet" .. i)
+            end
         end
     end
 end
@@ -287,100 +365,235 @@ local function GetLowestHealthUnit()
 end
 
 -------------------------------------------------------
--- Core function: SmartSealAttack
+-- Mode: Retribution / Support (shared)
 -------------------------------------------------------
-function SmartSealAttack()
+local function HandleRetAndSupport()
+    SetNextAction("Ret/Support: evaluating")
     if UnitAffectingCombat("player") then
         local health = UnitHealth("player")
         local maxHealth = UnitHealthMax("player")
         if maxHealth > 0 and (health / maxHealth) < 0.20 then
-            return "DIVINE_PROTECTION"
+            SetNextAction("Divine Protection")
+            CastSpellByName(DIVINE_PROTECTION_NAME)
+            return
         end
     end
 
-    if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
-        return "TARGET_NEAREST"
-    end
-
-    if not HasDevotionAura() then
-        CastSpellByName(AURA_NAME)
+    local auraName = GetDesiredAuraName()
+    if IsSpellKnown(auraName) and not HasBuffByName("player", auraName) then
+        SetNextAction("Aura: " .. auraName)
+        CastSpellByName(auraName)
         return
     end
 
-    if not HasBlessing() then
-        local toCast = SUPPORT_MODE and SUPPORT_BLESSING_NAME or BLESSING_NAME
-        CastSpellByName(toCast)
+    local blessName = GetDesiredBlessingName()
+    if IsSpellKnown(blessName) and not HasBuffByName("player", blessName) then
+        SetNextAction("Blessing: " .. blessName)
+        CastSpellOnUnit(blessName, "player")
+        return
+    end
+
+    -- Support mode: Flash of Light allies below 50% until they are above 85%
+    if currentMode == MODES.SUPPORT and IsSpellKnown(FLASH_OF_LIGHT_NAME) then
+        local lowestUnit, lowestFrac = GetLowestHealthUnit()
+
+        -- Continue healing an in-progress target until safe
+        if supportHealTarget then
+            local frac = GetUnitHealthFrac(supportHealTarget)
+            if not frac or frac >= 0.85 or not UnitCanAssist("player", supportHealTarget) or UnitIsDead(supportHealTarget) then
+                supportHealTarget = nil
+            else
+                SetNextAction("FoL -> " .. (UnitName(supportHealTarget) or supportHealTarget))
+                CastSpellOnUnit(FLASH_OF_LIGHT_NAME, supportHealTarget)
+                return
+            end
+        end
+
+        -- Start healing a new low target
+        if lowestUnit and lowestFrac and lowestFrac < 0.50 then
+            supportHealTarget = lowestUnit
+            SetNextAction("FoL -> " .. (UnitName(lowestUnit) or lowestUnit))
+            CastSpellOnUnit(FLASH_OF_LIGHT_NAME, lowestUnit)
+            return
+        end
+    end
+
+    -- Offensive target acquisition (after support heal so healing works without an enemy target)
+    if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
+        SetNextAction("Targeting enemy")
+        TargetNearestEnemy()
+    end
+    if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
+        SetNextAction("No valid target")
         return
     end
 
     local recentHits = GetRecentHitCount()
-    if recentHits >= HITS_FOR_HOJ and not HasHammerStun("target") then
-        return "HAMMER"
+    if recentHits >= HITS_FOR_HOJ and not HasHammerStun("target") and IsSpellKnown(HAMMER_NAME) then
+        SetNextAction("Hammer of Justice")
+        CastSpellByName(HAMMER_NAME)
+        return
     end
 
-    if IsJudgementReady() and not HasJudgementDebuff("target") and HasActiveSeal() then
+    if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasRetJudgementDebuff("target") and HasActiveRetSeal() then
+        SetNextAction("Judgement")
         CastSpellByName(JUDGEMENT_NAME)
         return
     end
 
-    if not HasActiveSeal() then
-        local bestSeal = GetBestSeal()
-        CastSpellByName(bestSeal)
-        return
-    elseif nextAction == "ATTACK" then
-        StartAutoAttack()
+    local retSeal = GetRetSealName()
+    if IsSpellKnown(retSeal) and not HasActiveRetSeal() then
+        SetNextAction("Seal: " .. retSeal)
+        CastSpellByName(retSeal)
         return
     end
+
+    SetNextAction("Auto-attack")
+    StartAutoAttack()
 end
 
 -------------------------------------------------------
 -- Mode: Healer (Holy)
 -------------------------------------------------------
 local function HandleHealerMode()
+    SetNextAction("Healer: evaluating")
     if UnitAffectingCombat("player") then
         local health = UnitHealth("player")
         local maxHealth = UnitHealthMax("player")
         if maxHealth > 0 and (health / maxHealth) < 0.20 then
+            SetNextAction("Divine Protection")
             CastSpellByName(DIVINE_PROTECTION_NAME)
             return
         end
     end
 
-    if not HasDesiredAura() then
-        CastSpellByName(GetDesiredAuraName())
+    local auraName = GetDesiredAuraName()
+    if IsSpellKnown(auraName) and not HasBuffByName("player", auraName) then
+        SetNextAction("Aura: " .. auraName)
+        CastSpellByName(auraName)
         return
     end
 
-    if not HasDesiredBlessing() then
-        CastSpellByName(GetDesiredBlessingName())
-        return
-    end
-
-    local healerSeal = GetHealerSealName()
-    if healerSeal and not HasBuffByName("player", healerSeal) then
-        CastSpellByName(healerSeal)
+    local blessName = GetDesiredBlessingName()
+    if IsSpellKnown(blessName) and not HasBuffByName("player", blessName) then
+        SetNextAction("Blessing: " .. blessName)
+        CastSpellOnUnit(blessName, "player")
         return
     end
 
     local unit, frac = GetLowestHealthUnit()
-    if not unit or not frac or frac >= 0.95 then
-        return
+    if not frac then frac = 1 end
+
+    local shouldDps = HEALER_DPS_MODE and frac >= 0.90
+
+    -- Skip seals entirely in pure healing mode to save mana.
+    -- Only manage seals when healer DPS mode is enabled.
+    if HEALER_DPS_MODE and not shouldDps then
+        local healerSeal = GetHealerSealName()
+        if healerSeal and not HasBuffByName("player", healerSeal) then
+            SetNextAction("Seal: " .. healerSeal)
+            CastSpellByName(healerSeal)
+            return
+        end
     end
 
-    if frac < 0.25 and IsSpellKnown(HOLY_SHOCK_NAME) and IsSpellReady(HOLY_SHOCK_NAME) then
+    if unit and frac < 0.25 and IsSpellKnown(HOLY_SHOCK_NAME) and IsSpellReady(HOLY_SHOCK_NAME) then
+        SetNextAction("Holy Shock -> " .. (UnitName(unit) or unit))
         CastSpellOnUnit(HOLY_SHOCK_NAME, unit)
         return
     end
 
-    if frac < 0.45 and IsSpellKnown(HOLY_LIGHT_NAME) then
+    if unit and frac < 0.45 and IsSpellKnown(HOLY_LIGHT_NAME) then
+        SetNextAction("Holy Light -> " .. (UnitName(unit) or unit))
         CastSpellOnUnit(HOLY_LIGHT_NAME, unit)
         return
     end
 
-    if frac < 0.85 and IsSpellKnown(FLASH_OF_LIGHT_NAME) then
+    if unit and frac < 0.85 and IsSpellKnown(FLASH_OF_LIGHT_NAME) then
+        SetNextAction("Flash of Light -> " .. (UnitName(unit) or unit))
         CastSpellOnUnit(FLASH_OF_LIGHT_NAME, unit)
         return
     end
+
+    -- Optional DPS while healing: only if group stable and mana high enough
+    if shouldDps then
+        if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
+            SetNextAction("Targeting enemy")
+            TargetNearestEnemy()
+        end
+        if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
+            SetNextAction("No valid target")
+            return
+        end
+
+        local manaFrac = GetPlayerManaFrac()
+
+        -- Seed healerJudgeSeal from current buffs or defaults
+        if not healerJudgeSeal then
+            if HasBuffByName("player", SEAL_OF_WISDOM_NAME) then
+                healerJudgeSeal = SEAL_OF_WISDOM_NAME
+            elseif HasBuffByName("player", SEAL_OF_LIGHT_NAME) then
+                healerJudgeSeal = SEAL_OF_LIGHT_NAME
+            elseif manaFrac < 0.70 and IsSpellKnown(SEAL_OF_WISDOM_NAME) then
+                healerJudgeSeal = SEAL_OF_WISDOM_NAME
+            elseif IsSpellKnown(SEAL_OF_LIGHT_NAME) then
+                healerJudgeSeal = SEAL_OF_LIGHT_NAME
+            elseif IsSpellKnown(SEAL_OF_WISDOM_NAME) then
+                healerJudgeSeal = SEAL_OF_WISDOM_NAME
+            end
+        end
+
+        -- Hysteresis: drop to Wisdom when low, back to Light when comfortably high
+        if healerJudgeSeal == SEAL_OF_LIGHT_NAME and manaFrac < 0.65 and IsSpellKnown(SEAL_OF_WISDOM_NAME) then
+            healerJudgeSeal = SEAL_OF_WISDOM_NAME
+        elseif healerJudgeSeal == SEAL_OF_WISDOM_NAME and manaFrac > 0.80 and IsSpellKnown(SEAL_OF_LIGHT_NAME) then
+            healerJudgeSeal = SEAL_OF_LIGHT_NAME
+        end
+
+        -- If swapping seals, judge the current one first (if ready and no healer judgement up)
+        local currentSeal = nil
+        if HasBuffByName("player", SEAL_OF_WISDOM_NAME) then
+            currentSeal = SEAL_OF_WISDOM_NAME
+        elseif HasBuffByName("player", SEAL_OF_LIGHT_NAME) then
+            currentSeal = SEAL_OF_LIGHT_NAME
+        end
+
+        if currentSeal and healerJudgeSeal and currentSeal ~= healerJudgeSeal then
+            if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasHealerJudgementDebuff("target") then
+                CastSpellByName(JUDGEMENT_NAME)
+                return
+            end
+        end
+
+        local judgeSeal = healerJudgeSeal
+
+        if judgeSeal then
+            if not HasBuffByName("player", judgeSeal) then
+                SetNextAction("Seal: " .. judgeSeal)
+                CastSpellByName(judgeSeal)
+                return
+            end
+
+            if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasHealerJudgementDebuff("target") then
+                SetNextAction("Judgement")
+                CastSpellByName(JUDGEMENT_NAME)
+                return
+            end
+
+            -- Reapply seal after judging (consumed)
+            if not HasBuffByName("player", judgeSeal) then
+                SetNextAction("Seal: " .. judgeSeal)
+                CastSpellByName(judgeSeal)
+                return
+            end
+        end
+
+        SetNextAction("Auto-attack")
+        StartAutoAttack()
+        return
+    end
+
+    SetNextAction("Healer: idle")
 end
 
 -------------------------------------------------------
@@ -409,6 +622,11 @@ end
 local function SetMode(newMode)
     if currentMode == newMode then return end
     currentMode = newMode
+    if newMode ~= MODES.HEALER then
+        HEALER_DPS_MODE = false
+        healerJudgeSeal = nil
+    end
+    SetNextAction("Mode: " .. newMode)
     DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Mode set to " .. newMode)
 end
 
@@ -419,17 +637,26 @@ SlashCmdList["SMARTSEALATTACK"] = function(msg)
     m = string.lower(m)
     m = string.gsub(m, "^%s+", "")
     m = string.gsub(m, "%s+$", "")
-    if m == "support on" then
-        SUPPORT_MODE = true
-        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode ON — using Blessing of Wisdom")
+    if m == "healer" or m == "mode healer" then
+        SetMode(MODES.HEALER)
         return
-    elseif m == "support off" then
-        SUPPORT_MODE = false
-        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Support mode OFF — using Blessing of Might")
+    elseif m == "ret" or m == "mode ret" or m == "dps" then
+        SetMode(MODES.RET)
+        return
+    elseif m == "support" or m == "mode support" then
+        SetMode(MODES.SUPPORT)
+        return
+    elseif m == "healer dps on" then
+        HEALER_DPS_MODE = true
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Healer DPS mode ON (only with >90% group hp and >65% mana)")
+        return
+    elseif m == "healer dps off" then
+        HEALER_DPS_MODE = false
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: Healer DPS mode OFF")
         return
     end
 
-    local assignArg = string.match(m, "^assign%s+(%w+)$")
+    local _, _, assignArg = string.find(m, "^assign%s+(%w+)$")
     if assignArg then
         if BLESSING_BY_KEY[assignArg] then
             assignedBlessing = assignArg
@@ -446,3 +673,10 @@ end
 -------------------------------------------------------
 -- Basic load message
 -------------------------------------------------------
+local loadFrame = CreateFrame("Frame")
+loadFrame:RegisterEvent("PLAYER_LOGIN")
+loadFrame:SetScript("OnEvent", function()
+    EnsureNextActionFrame()
+    SetNextAction("Ready")
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00SmartSealAttack loaded.|r Type |cffffff00/ssa|r.")
+end)
