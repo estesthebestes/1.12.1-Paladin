@@ -30,7 +30,6 @@ local MODES = {
 }
 
 local currentMode = MODES.RET
-local SUPPORT_MODE = false
 local HEALER_DPS_MODE = false
 local healerJudgeSeal = nil
 local supportHealTarget = nil
@@ -163,6 +162,20 @@ local function IsSpellReady(spellName)
     return (start + duration - GetTime()) <= 0
 end
 
+local function IsJudgementReadyOn(unit)
+    if not IsSpellKnown(JUDGEMENT_NAME) or not IsSpellReady(JUDGEMENT_NAME) then
+        return false
+    end
+    if not unit or not UnitExists(unit) or UnitIsDead(unit) then
+        return false
+    end
+    -- Judgement is 10 yards; use interact distance 3 (10-yard check) when available.
+    if CheckInteractDistance and not CheckInteractDistance(unit, 3) then
+        return false
+    end
+    return true
+end
+
 -------------------------------------------------------
 -- Core helpers
 -------------------------------------------------------
@@ -186,10 +199,6 @@ local function GetDesiredAuraName()
     return AURA_NAME
 end
 
-local function HasDesiredAura()
-    return HasBuffByName("player", GetDesiredAuraName())
-end
-
 local function GetDesiredBlessingName()
     if currentMode == MODES.HEALER then
         return BLESSING_BY_KEY[assignedBlessing] or BLESSING_WISDOM_NAME
@@ -197,10 +206,6 @@ local function GetDesiredBlessingName()
         return BLESSING_WISDOM_NAME
     end
     return BLESSING_MIGHT_NAME
-end
-
-local function HasDesiredBlessing()
-    return HasBuffByName("player", GetDesiredBlessingName())
 end
 
 local function IsCommandLearned()
@@ -228,10 +233,6 @@ local function GetHealerSealName()
         return SEAL_OF_LIGHT_NAME
     end
     return SEAL_NAME
-end
-
-local function HasJudgementDebuff(unit)
-    return HasDebuffByName(unit, JUDGEMENT_DEBUFF_NAME)
 end
 
 local function HasRetJudgementDebuff(unit)
@@ -364,6 +365,34 @@ local function GetLowestHealthUnit()
     return lowestUnit, lowestFrac
 end
 
+-- Return first melee/ranged physical dps that should have Blessing of Might.
+local MIGHT_FAVORING_CLASSES = {
+    WARRIOR = true,
+    ROGUE = true,
+    HUNTER = true,
+}
+
+local function NeedsBlessingOfMight(unit)
+    if not UnitExists(unit) or UnitIsDead(unit) or not UnitCanAssist("player", unit) then
+        return false
+    end
+    local _, class = UnitClass(unit)
+    if not class or not MIGHT_FAVORING_CLASSES[class] then
+        return false
+    end
+    return not HasBuffByName(unit, BLESSING_MIGHT_NAME)
+end
+
+local function FindMightTargetNeedingBuff()
+    local target = nil
+    ForEachGroupUnit(function(unit)
+        if not target and NeedsBlessingOfMight(unit) then
+            target = unit
+        end
+    end)
+    return target
+end
+
 -------------------------------------------------------
 -- Mode: Retribution / Support (shared)
 -------------------------------------------------------
@@ -391,6 +420,16 @@ local function HandleRetAndSupport()
         SetNextAction("Blessing: " .. blessName)
         CastSpellOnUnit(blessName, "player")
         return
+    end
+
+    -- Keep Blessing of Might on physical DPS (warriors/rogues/hunters)
+    if IsSpellKnown(BLESSING_MIGHT_NAME) then
+        local mightTarget = FindMightTargetNeedingBuff()
+        if mightTarget then
+            SetNextAction("BoM -> " .. (UnitName(mightTarget) or mightTarget))
+            CastSpellOnUnit(BLESSING_MIGHT_NAME, mightTarget)
+            return
+        end
     end
 
     -- Support mode: Flash of Light allies below 50% until they are above 85%
@@ -435,7 +474,7 @@ local function HandleRetAndSupport()
         return
     end
 
-    if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasRetJudgementDebuff("target") and HasActiveRetSeal() then
+    if IsJudgementReadyOn("target") and not HasRetJudgementDebuff("target") and HasActiveRetSeal() then
         SetNextAction("Judgement")
         CastSpellByName(JUDGEMENT_NAME)
         return
@@ -515,6 +554,16 @@ local function HandleHealerMode()
         return
     end
 
+    -- Keep Blessing of Might on physical DPS (warriors/rogues/hunters) when the group is stable
+    if IsSpellKnown(BLESSING_MIGHT_NAME) then
+        local mightTarget = FindMightTargetNeedingBuff()
+        if mightTarget then
+            SetNextAction("BoM -> " .. (UnitName(mightTarget) or mightTarget))
+            CastSpellOnUnit(BLESSING_MIGHT_NAME, mightTarget)
+            return
+        end
+    end
+
     -- Optional DPS while healing: only if group stable and mana high enough
     if shouldDps then
         if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
@@ -559,7 +608,7 @@ local function HandleHealerMode()
         end
 
         if currentSeal and healerJudgeSeal and currentSeal ~= healerJudgeSeal then
-            if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasHealerJudgementDebuff("target") then
+            if IsJudgementReadyOn("target") and not HasHealerJudgementDebuff("target") then
                 CastSpellByName(JUDGEMENT_NAME)
                 return
             end
@@ -574,7 +623,7 @@ local function HandleHealerMode()
                 return
             end
 
-            if IsSpellKnown(JUDGEMENT_NAME) and IsSpellReady(JUDGEMENT_NAME) and not HasHealerJudgementDebuff("target") then
+            if IsJudgementReadyOn("target") and not HasHealerJudgementDebuff("target") then
                 SetNextAction("Judgement")
                 CastSpellByName(JUDGEMENT_NAME)
                 return
@@ -610,15 +659,6 @@ end
 -------------------------------------------------------
 -- Slash command: /ssa
 -------------------------------------------------------
-local function TrimLower(msg)
-    msg = msg or ""
-    msg = tostring(msg)
-    msg = string.lower(msg)
-    msg = string.gsub(msg, "^%s+", "")
-    msg = string.gsub(msg, "%s+$", "")
-    return msg
-end
-
 local function SetMode(newMode)
     if currentMode == newMode then return end
     currentMode = newMode
