@@ -60,12 +60,19 @@ local function SetNextAction(text)
 end
 
 local function EnsureNextActionFrame()
-    if SSA_NextActionFrame then return end
+    if SSA_NextActionFrame then
+        SSA_NextActionFrame:Show()
+        if SSA_NextActionFrame.text then
+            SSA_NextActionFrame.text:SetText("SSA: " .. nextActionText)
+        end
+        return
+    end
     local f = CreateFrame("Frame", "SSA_NextActionFrame", UIParent)
-    f:SetWidth(190)
-    f:SetHeight(24)
+    f:SetWidth(220)
+    f:SetHeight(28)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 180)
     f:SetFrameStrata("HIGH")
+    f:SetClampedToScreen(true)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -78,53 +85,85 @@ local function EnsureNextActionFrame()
         insets = { left = 2, right = 2, top = 2, bottom = 2 }
     })
     f:SetBackdropColor(0, 0, 0, 0.4)
+    f:SetBackdropBorderColor(0.8, 0.8, 0.3, 1)
 
     local text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    text:SetAllPoints(f)
+    text:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -6)
+    text:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, 6)
     text:SetJustifyH("CENTER")
     text:SetJustifyV("MIDDLE")
-    text:SetText("SSA: Ready")
+    text:SetText("SSA: " .. nextActionText)
     f.text = text
+end
+
+local function ResetNextActionFramePosition()
+    EnsureNextActionFrame()
+    SSA_NextActionFrame:ClearAllPoints()
+    SSA_NextActionFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 180)
 end
 
 -------------------------------------------------------
 -- Generic tooltip-based buff/debuff checks
 -------------------------------------------------------
+local scanTooltip = CreateFrame("GameTooltip", "SSA_ScanTooltip", UIParent, "GameTooltipTemplate")
+scanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+local GetSpellTextureByName
+
+local function GetScanTooltipName()
+    local leftText = getglobal("SSA_ScanTooltipTextLeft1")
+    if leftText then
+        return leftText:GetText()
+    end
+    return nil
+end
+
 local function HasBuffByName(unit, wantedName)
+    local wantedTexture = GetSpellTextureByName and GetSpellTextureByName(wantedName) or nil
     for i = 1, 40 do
         local tex = UnitBuff(unit, i)
         if not tex then
             break
         end
 
-        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-        GameTooltip:ClearLines()
-        GameTooltip:SetUnitBuff(unit, i)
+        if wantedTexture and tex == wantedTexture then
+            return true
+        end
 
-        local buffName = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText() or nil
+        scanTooltip:ClearLines()
+        scanTooltip:SetUnitBuff(unit, i)
+
+        local buffName = GetScanTooltipName()
         if buffName == wantedName then
+            scanTooltip:Hide()
             return true
         end
     end
+    scanTooltip:Hide()
     return false
 end
 
 local function HasDebuffByName(unit, wantedName)
+    local wantedTexture = GetSpellTextureByName and GetSpellTextureByName(wantedName) or nil
     for i = 1, 40 do
         local tex = UnitDebuff(unit, i)
         if not tex then
             break
         end
 
-        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-        GameTooltip:ClearLines()
-        GameTooltip:SetUnitDebuff(unit, i)
+        if wantedTexture and tex == wantedTexture then
+            return true
+        end
 
-        local debuffName = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText() or nil
+        scanTooltip:ClearLines()
+        scanTooltip:SetUnitDebuff(unit, i)
+
+        local debuffName = GetScanTooltipName()
         if debuffName == wantedName then
+            scanTooltip:Hide()
             return true
         end
     end
+    scanTooltip:Hide()
     return false
 end
 
@@ -132,6 +171,7 @@ end
 -- Spellbook helpers
 -------------------------------------------------------
 local spellIndexCache = {}
+local spellTextureCache = {}
 
 local function FindSpellIndex(spellName)
     if spellIndexCache[spellName] then
@@ -153,6 +193,25 @@ end
 
 local function IsSpellKnown(spellName)
     return FindSpellIndex(spellName) ~= nil
+end
+
+GetSpellTextureByName = function(spellName)
+    if spellTextureCache[spellName] ~= nil then
+        if spellTextureCache[spellName] == false then
+            return nil
+        end
+        return spellTextureCache[spellName]
+    end
+
+    local idx = FindSpellIndex(spellName)
+    if not idx then
+        spellTextureCache[spellName] = false
+        return nil
+    end
+
+    local texture = GetSpellTexture(idx, "spell")
+    spellTextureCache[spellName] = texture or false
+    return texture
 end
 
 local function IsSpellReady(spellName)
@@ -297,26 +356,50 @@ local function StartAutoAttack()
     end
 end
 
-local function CastSpellOnUnit(spellName, unit)
-    if not UnitExists(unit) then return end
-
-    local hadTarget = UnitExists("target")
-
-    -- Force correct unit into cursor/target, then restore.
-    TargetUnit(unit)
-    CastSpellByName(spellName)
-    if SpellIsTargeting() then
-        SpellTargetUnit(unit)
-        if SpellIsTargeting() then
-            SpellStopTargeting()
-        end
-    end
-
+local function RestorePreviousTarget(hadTarget)
     if hadTarget then
         TargetLastTarget()
     else
         ClearTarget()
     end
+end
+
+local function CastSpellOnUnit(spellName, unit)
+    if not UnitExists(unit) then return end
+
+    if unit == "player" then
+        CastSpellByName(spellName, 1)
+        return
+    end
+
+    if unit == "target" then
+        CastSpellByName(spellName)
+        if SpellIsTargeting() then
+            if not SpellCanTargetUnit or SpellCanTargetUnit("target") then
+                SpellTargetUnit("target")
+            end
+            if SpellIsTargeting() then
+                SpellStopTargeting()
+            end
+        end
+        return
+    end
+
+    local hadTarget = UnitExists("target")
+
+    -- Vanilla-safe fallback for non-target units: switch target, cast, then restore.
+    TargetUnit(unit)
+    CastSpellByName(spellName)
+    if SpellIsTargeting() then
+        if not SpellCanTargetUnit or SpellCanTargetUnit(unit) then
+            SpellTargetUnit(unit)
+        end
+        if SpellIsTargeting() then
+            SpellStopTargeting()
+        end
+    end
+
+    RestorePreviousTarget(hadTarget)
 end
 
 -------------------------------------------------------
@@ -403,7 +486,7 @@ local function HandleRetAndSupport()
     if UnitAffectingCombat("player") then
         local health = UnitHealth("player")
         local maxHealth = UnitHealthMax("player")
-        if maxHealth > 0 and (health / maxHealth) < 0.20 then
+        if maxHealth > 0 and (health / maxHealth) < 0.20 and IsSpellKnown(DIVINE_PROTECTION_NAME) and IsSpellReady(DIVINE_PROTECTION_NAME) then
             SetNextAction("Divine Protection")
             CastSpellByName(DIVINE_PROTECTION_NAME)
             return
@@ -472,7 +555,7 @@ local function HandleRetAndSupport()
     end
 
     local recentHits = GetRecentHitCount()
-    if recentHits >= HITS_FOR_HOJ and not HasHammerStun("target") and IsSpellKnown(HAMMER_NAME) then
+    if recentHits >= HITS_FOR_HOJ and not HasHammerStun("target") and IsSpellKnown(HAMMER_NAME) and IsSpellReady(HAMMER_NAME) then
         SetNextAction("Hammer of Justice")
         CastSpellByName(HAMMER_NAME)
         return
@@ -503,7 +586,7 @@ local function HandleHealerMode()
     if UnitAffectingCombat("player") then
         local health = UnitHealth("player")
         local maxHealth = UnitHealthMax("player")
-        if maxHealth > 0 and (health / maxHealth) < 0.20 then
+        if maxHealth > 0 and (health / maxHealth) < 0.20 and IsSpellKnown(DIVINE_PROTECTION_NAME) and IsSpellReady(DIVINE_PROTECTION_NAME) then
             SetNextAction("Divine Protection")
             CastSpellByName(DIVINE_PROTECTION_NAME)
             return
@@ -527,18 +610,8 @@ local function HandleHealerMode()
     local unit, frac = GetLowestHealthUnit()
     if not frac then frac = 1 end
 
-    local shouldDps = HEALER_DPS_MODE and frac >= 0.90
-
-    -- Skip seals entirely in pure healing mode to save mana.
-    -- Only manage seals when healer DPS mode is enabled.
-    if HEALER_DPS_MODE and not shouldDps then
-        local healerSeal = GetHealerSealName()
-        if healerSeal and not HasBuffByName("player", healerSeal) then
-            SetNextAction("Seal: " .. healerSeal)
-            CastSpellByName(healerSeal)
-            return
-        end
-    end
+    local manaFrac = GetPlayerManaFrac()
+    local shouldDps = HEALER_DPS_MODE and frac >= 0.90 and manaFrac >= 0.65
 
     if unit and frac < 0.25 and IsSpellKnown(HOLY_SHOCK_NAME) and IsSpellReady(HOLY_SHOCK_NAME) then
         SetNextAction("Holy Shock -> " .. (UnitName(unit) or unit))
@@ -578,8 +651,6 @@ local function HandleHealerMode()
             SetNextAction("No valid target")
             return
         end
-
-        local manaFrac = GetPlayerManaFrac()
 
         -- Seed healerJudgeSeal from current buffs or defaults
         if not healerJudgeSeal then
@@ -679,6 +750,7 @@ end
 local function SetMode(newMode)
     if currentMode == newMode then return end
     currentMode = newMode
+    supportHealTarget = nil
     if newMode ~= MODES.HEALER then
         HEALER_DPS_MODE = false
         healerJudgeSeal = nil
@@ -713,6 +785,20 @@ SlashCmdList["SMARTSEALATTACK"] = function(msg)
         return
     elseif m == "heal" or m == "heal pulse" or m == "heal now" then
         SmartSealHealPulse()
+        return
+    elseif m == "ui" or m == "ui show" then
+        EnsureNextActionFrame()
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: UI shown.")
+        return
+    elseif m == "ui hide" then
+        if SSA_NextActionFrame then
+            SSA_NextActionFrame:Hide()
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: UI hidden.")
+        return
+    elseif m == "ui reset" then
+        ResetNextActionFramePosition()
+        DEFAULT_CHAT_FRAME:AddMessage("SmartSealAttack: UI position reset.")
         return
     end
 
